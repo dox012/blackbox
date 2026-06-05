@@ -55,6 +55,29 @@ static class NativeMethods
     [DllImport("user32.dll")]
     public static extern bool UnhookWinEvent(IntPtr hWinEventHook);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);
+
+    // WDA_EXCLUDEFROMCAPTURE：窗口正常显示在物理显示器上，但对屏幕捕获 API 隐身，
+    // 捕获时会穿透抓到它后面的真实桌面。需 Windows 10 2004（build 19041）以上。
+    public const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
+
+    [DllImport("user32.dll")]
+    public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
+    public const uint LWA_ALPHA = 0x00000002;
+
+    [DllImport("user32.dll")]
+    public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+    [DllImport("user32.dll")]
+    public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+    public const uint MOD_NOREPEAT = 0x4000;
+    public const uint VK_ESCAPE    = 0x1B;
+    public const int  WM_HOTKEY    = 0x0312;
+
+    public const int WS_EX_LAYERED     = 0x00080000;
+    public const int WS_EX_TRANSPARENT = 0x00000020;
+    public const int WS_EX_NOACTIVATE  = 0x08000000;
+
     public const uint EVENT_SYSTEM_FOREGROUND  = 0x0003;
     public const uint EVENT_OBJECT_SHOW        = 0x8002;
     public const uint WINEVENT_OUTOFCONTEXT    = 0x0000;
@@ -69,6 +92,51 @@ static class NativeMethods
         // 无符号相减天然处理 TickCount 回绕（约 49.7 天）。
         uint elapsed = (uint)Environment.TickCount - lii.dwTime;
         return elapsed;
+    }
+}
+
+// 黑屏覆盖窗口：分层 + 鼠标穿透 + 不抢焦点。
+// 鼠标穿透（WS_EX_TRANSPARENT）让远控的点击直接落到后面的真实桌面；
+// 分层（WS_EX_LAYERED）+ 不透明（LWA_ALPHA=255）保证物理屏幕上仍是全黑。
+class BlackForm : Form
+{
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            CreateParams cp = base.CreateParams;
+            cp.ExStyle |= NativeMethods.WS_EX_LAYERED
+                        | NativeMethods.WS_EX_TRANSPARENT
+                        | NativeMethods.WS_EX_NOACTIVATE;
+            return cp;
+        }
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        // 分层窗口默认不绘制，需显式设为不透明才会显示黑色背景。
+        NativeMethods.SetLayeredWindowAttributes(Handle, 0, 255, NativeMethods.LWA_ALPHA);
+    }
+}
+
+// 隐藏的消息窗口，专门接收全局热键（WM_HOTKEY）。
+class HotkeyWindow : NativeWindow
+{
+    public Action Pressed;
+
+    public HotkeyWindow()
+    {
+        CreateParams cp = new CreateParams();
+        cp.Parent = new IntPtr(-3); // HWND_MESSAGE：仅消息窗口
+        CreateHandle(cp);
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == NativeMethods.WM_HOTKEY && Pressed != null)
+            Pressed();
+        base.WndProc(ref m);
     }
 }
 
@@ -94,6 +162,11 @@ class TrayApp : ApplicationContext
     IntPtr hookShow = IntPtr.Zero;
     IntPtr hookForeground = IntPtr.Zero;
 
+    // 全局 Esc 热键：黑屏期间收回（点击穿透后，靠窗口焦点接收 Esc 已不可靠）。
+    readonly HotkeyWindow hotkeyWindow;
+    const int HOTKEY_ID = 1;
+    bool hotkeyRegistered = false;
+
     // 定时设置（分钟，支持小数；仅存内存，重启不保留）：
     //   0  = 关闭（交还系统自身的休眠/息屏）
     //   <0 = 常亮（阻止系统休眠/息屏，永不自动黑屏）
@@ -103,6 +176,8 @@ class TrayApp : ApplicationContext
     public TrayApp()
     {
         winEventProc = OnWinEvent;
+        hotkeyWindow = new HotkeyWindow();
+        hotkeyWindow.Pressed = BlackOff; // 全局 Esc 仅在黑屏时注册，按下即收回
 
         toggleItem = new ToolStripMenuItem("黑屏", null, (s, e) => Toggle());
 
@@ -146,24 +221,23 @@ class TrayApp : ApplicationContext
         RefreshExecutionState();
         Cursor.Hide();
 
-        Form main = null;
         foreach (Screen scr in Screen.AllScreens)
         {
-            Form f = new Form();
+            BlackForm f = new BlackForm();
             f.FormBorderStyle = FormBorderStyle.None;
             f.BackColor       = Color.Black;
             f.StartPosition   = FormStartPosition.Manual;
             f.Bounds          = scr.Bounds;
             f.TopMost         = true;
             f.ShowInTaskbar   = false;
-            f.KeyPreview      = true;
-            f.KeyDown        += (s, e) => { if (e.KeyCode == Keys.Escape) BlackOff(); };
             blackForms.Add(f);
-            if (main == null) main = f;
             f.Show();
+            // 让黑屏窗口只盖住物理屏幕，但对远控/录屏的屏幕捕获隐身——
+            // 现场看是黑的，远程控制仍能看到真实桌面。失败（旧系统）则退化为普通黑屏。
+            NativeMethods.SetWindowDisplayAffinity(f.Handle, NativeMethods.WDA_EXCLUDEFROMCAPTURE);
         }
-        if (main != null) { main.Activate(); main.Focus(); }
 
+        RegisterEscHotkey();
         HookWindowEvents();
         toggleItem.Text = "关闭黑屏";
     }
@@ -173,6 +247,7 @@ class TrayApp : ApplicationContext
         if (!isBlack) return;
         isBlack = false;
 
+        UnregisterEscHotkey();
         UnhookWindowEvents();
 
         foreach (Form f in blackForms)
@@ -263,6 +338,21 @@ class TrayApp : ApplicationContext
         }
     }
 
+    void RegisterEscHotkey()
+    {
+        if (hotkeyRegistered) return;
+        // 无修饰键的全局 Esc，仅黑屏期间生效；MOD_NOREPEAT 避免长按重复触发。
+        hotkeyRegistered = NativeMethods.RegisterHotKey(
+            hotkeyWindow.Handle, HOTKEY_ID, NativeMethods.MOD_NOREPEAT, NativeMethods.VK_ESCAPE);
+    }
+
+    void UnregisterEscHotkey()
+    {
+        if (!hotkeyRegistered) return;
+        NativeMethods.UnregisterHotKey(hotkeyWindow.Handle, HOTKEY_ID);
+        hotkeyRegistered = false;
+    }
+
     void SetAuto(double minutes)
     {
         autoMinutes = (minutes < 0) ? -1 : minutes; // 任意负数统一视为常亮
@@ -348,8 +438,9 @@ class TrayApp : ApplicationContext
         pollTimer.Stop();
         pollTimer.Dispose();
         autoMinutes = 0;       // 退出前清除常亮/定时，恢复系统默认休眠
-        BlackOff();            // BlackOff 内的 RefreshExecutionState 会还原执行状态
+        BlackOff();            // BlackOff 内会注销热键 + 还原执行状态
         if (!isBlack) RefreshExecutionState();
+        hotkeyWindow.DestroyHandle();
         tray.Visible = false;
         tray.Dispose();
         if (trayIcon != null) trayIcon.Dispose();
