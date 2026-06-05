@@ -94,11 +94,11 @@ class TrayApp : ApplicationContext
     IntPtr hookShow = IntPtr.Zero;
     IntPtr hookForeground = IntPtr.Zero;
 
-    // 定时设置（仅存内存，重启不保留）：
+    // 定时设置（分钟，支持小数；仅存内存，重启不保留）：
     //   0  = 关闭（交还系统自身的休眠/息屏）
     //   <0 = 常亮（阻止系统休眠/息屏，永不自动黑屏）
     //   >0 = 空闲 N 分钟后自动黑屏（期间阻止系统先行休眠）
-    int autoMinutes = 0;
+    double autoMinutes = 0;
 
     public TrayApp()
     {
@@ -207,7 +207,7 @@ class TrayApp : ApplicationContext
         }
         if (autoMinutes > 0)
         {
-            long thresholdMs = (long)autoMinutes * 60000L;
+            long thresholdMs = (long)(autoMinutes * 60000.0);
             if (NativeMethods.IdleMilliseconds() >= thresholdMs)
                 BlackOn();
         }
@@ -263,7 +263,7 @@ class TrayApp : ApplicationContext
         }
     }
 
-    void SetAuto(int minutes)
+    void SetAuto(double minutes)
     {
         autoMinutes = (minutes < 0) ? -1 : minutes; // 任意负数统一视为常亮
         UpdateAuto();
@@ -271,7 +271,7 @@ class TrayApp : ApplicationContext
 
     void CustomAuto()
     {
-        int value;
+        double value;
         if (TryPromptMinutes(autoMinutes, out value))
             SetAuto(value);
     }
@@ -282,7 +282,7 @@ class TrayApp : ApplicationContext
         string status;
         if (autoMinutes < 0)       status = "常亮，永不黑屏";
         else if (autoMinutes == 0) status = "关闭";
-        else                       status = "空闲 " + autoMinutes + " 分钟后黑屏";
+        else                       status = "空闲 " + autoMinutes.ToString("0.#") + " 分钟后黑屏";
 
         autoItem.Text = "定时黑屏：" + status + "…";
         tray.Text = "blackbox — 单击开/关黑屏（" + status + "）";
@@ -290,8 +290,8 @@ class TrayApp : ApplicationContext
         RefreshExecutionState();
     }
 
-    // 弹出一个小窗输入分钟数：负数=常亮，0=关闭，正数=空闲后黑屏。
-    static bool TryPromptMinutes(int current, out int minutes)
+    // 弹出一个小窗输入分钟数（支持一位小数）：负数=常亮，0=关闭，正数=空闲后黑屏。
+    static bool TryPromptMinutes(double current, out double minutes)
     {
         minutes = current;
         using (Form dlg = new Form())
@@ -305,13 +305,15 @@ class TrayApp : ApplicationContext
             dlg.ClientSize = new Size(300, 120);
 
             Label lbl = new Label();
-            lbl.Text = "空闲多少分钟后自动黑屏：\r\n负数 = 常亮，0 = 关闭（用系统默认）";
+            lbl.Text = "空闲多少分钟后自动黑屏（可填小数，如 0.5）：\r\n负数 = 常亮，0 = 关闭（用系统默认）";
             lbl.SetBounds(12, 12, 276, 40);
 
             NumericUpDown num = new NumericUpDown();
             num.Minimum = -1;
             num.Maximum = 1440; // 上限 24 小时
-            int clamped = current < -1 ? -1 : (current > 1440 ? 1440 : current);
+            num.DecimalPlaces = 1;
+            num.Increment = 0.5m;
+            decimal clamped = current < -1 ? -1m : (current > 1440 ? 1440m : (decimal)current);
             num.Value = clamped;
             num.SetBounds(12, 56, 90, 26);
 
@@ -334,7 +336,7 @@ class TrayApp : ApplicationContext
 
             if (dlg.ShowDialog() == DialogResult.OK)
             {
-                minutes = (int)num.Value;
+                minutes = (double)num.Value;
                 return true;
             }
             return false;
