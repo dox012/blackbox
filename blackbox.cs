@@ -83,8 +83,7 @@ class TrayApp : ApplicationContext
     readonly NotifyIcon tray;
     readonly Icon trayIcon;
     readonly ToolStripMenuItem toggleItem;
-    readonly ToolStripMenuItem autoMenu;
-    readonly ToolStripMenuItem customItem;
+    readonly ToolStripMenuItem autoItem;
     readonly Timer pollTimer;
     readonly List<Form> blackForms = new List<Form>();
     bool isBlack = false;
@@ -107,23 +106,13 @@ class TrayApp : ApplicationContext
 
         toggleItem = new ToolStripMenuItem("黑屏", null, (s, e) => Toggle());
 
-        autoMenu = new ToolStripMenuItem("定时黑屏");
-        autoMenu.DropDownItems.Add(MakePreset("关闭", 0));
-        autoMenu.DropDownItems.Add(MakePreset("常亮（永不黑屏）", -1));
-        autoMenu.DropDownItems.Add(new ToolStripSeparator());
-        autoMenu.DropDownItems.Add(MakePreset("空闲 1 分钟", 1));
-        autoMenu.DropDownItems.Add(MakePreset("空闲 5 分钟", 5));
-        autoMenu.DropDownItems.Add(MakePreset("空闲 10 分钟", 10));
-        autoMenu.DropDownItems.Add(MakePreset("空闲 30 分钟", 30));
-        autoMenu.DropDownItems.Add(new ToolStripSeparator());
-        customItem = new ToolStripMenuItem("自定义…", null, (s, e) => CustomAuto());
-        autoMenu.DropDownItems.Add(customItem);
+        autoItem = new ToolStripMenuItem("定时黑屏…", null, (s, e) => CustomAuto());
 
         var quitItem = new ToolStripMenuItem("退出", null, (s, e) => Quit());
 
         var menu = new ContextMenuStrip();
         menu.Items.Add(toggleItem);
-        menu.Items.Add(autoMenu);
+        menu.Items.Add(autoItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(quitItem);
 
@@ -140,14 +129,7 @@ class TrayApp : ApplicationContext
         pollTimer.Tick += OnPollTick;
         pollTimer.Start();
 
-        UpdateAuto(); // 初始化菜单勾选、tray 提示和执行状态
-    }
-
-    ToolStripMenuItem MakePreset(string text, int minutes)
-    {
-        ToolStripMenuItem item = new ToolStripMenuItem(text, null, (s, e) => SetAuto(minutes));
-        item.Tag = minutes;
-        return item;
+        UpdateAuto(); // 初始化菜单文字、tray 提示和执行状态
     }
 
     void Toggle()
@@ -294,27 +276,15 @@ class TrayApp : ApplicationContext
             SetAuto(value);
     }
 
-    // 刷新菜单勾选、托盘提示，并应用执行状态。
+    // 刷新菜单文字、托盘提示，并应用执行状态。
     void UpdateAuto()
     {
-        foreach (ToolStripItem it in autoMenu.DropDownItems)
-        {
-            ToolStripMenuItem mi = it as ToolStripMenuItem;
-            if (mi != null && mi.Tag is int)
-                mi.Checked = ((int)mi.Tag == autoMinutes);
-        }
-
         string status;
-        if (autoMinutes < 0)      status = "常亮，永不黑屏";
-        else if (autoMinutes == 0) status = "定时关闭";
-        else                      status = "空闲 " + autoMinutes + " 分钟后黑屏";
-        // 自定义值不在预设里时，把它显示在“自定义…”项上，并打勾。
-        bool isPreset = (autoMinutes == 0 || autoMinutes == -1 ||
-                         autoMinutes == 1 || autoMinutes == 5 ||
-                         autoMinutes == 10 || autoMinutes == 30);
-        customItem.Checked = !isPreset;
-        customItem.Text = isPreset ? "自定义…" : ("自定义：" + status);
+        if (autoMinutes < 0)       status = "常亮，永不黑屏";
+        else if (autoMinutes == 0) status = "关闭";
+        else                       status = "空闲 " + autoMinutes + " 分钟后黑屏";
 
+        autoItem.Text = "定时黑屏：" + status + "…";
         tray.Text = "blackbox — 单击开/关黑屏（" + status + "）";
 
         RefreshExecutionState();
