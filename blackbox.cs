@@ -373,14 +373,17 @@ class TrayApp : ApplicationContext
     }
 
     // 光标是全局精灵、画在所有窗口之上，普通隐藏对穿透窗口无效，
-    // 这里把所有系统光标临时换成空（全透明）光标，收回时再从注册表还原。
+    // 这里把所有系统光标临时换成“只有左上角一个黑像素”的光标，收回时再从注册表还原。
+    // 单黑像素：物理黑屏上黑点不可见（伪装不破），但远控端看到的真实桌面通常偏亮、能看清指针位置。
     void HideSystemCursors()
     {
         if (cursorsHidden) return;
-        // 32x32 单色光标：AND 全 1、XOR 全 0 => 完全透明（不可见）。
+        // 32x32 单色光标：AND=1&XOR=0 透明，AND=0&XOR=0 黑色。
+        // 全透明，仅热点处 (0,0) 一个像素设为黑（andPlane 首字节最高位清零）。
         byte[] andPlane = new byte[128];
         byte[] xorPlane = new byte[128];
         for (int i = 0; i < andPlane.Length; i++) andPlane[i] = 0xFF;
+        andPlane[0] = 0x7F; // 行 0 最左像素：AND=0 => 与 XOR=0 合成黑色
 
         bool any = false;
         foreach (uint id in NativeMethods.SystemCursorIds)
