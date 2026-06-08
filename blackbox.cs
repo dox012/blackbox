@@ -78,6 +78,20 @@ static class NativeMethods
     public const int WS_EX_TRANSPARENT = 0x00000020;
     public const int WS_EX_NOACTIVATE  = 0x08000000;
 
+    [DllImport("user32.dll")]
+    public static extern IntPtr CreateCursor(IntPtr hInst, int xHotSpot, int yHotSpot,
+        int nWidth, int nHeight, byte[] pvANDPlane, byte[] pvXORPlane);
+    [DllImport("user32.dll")]
+    public static extern bool SetSystemCursor(IntPtr hcur, uint id);
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
+    public const uint SPI_SETCURSORS = 0x0057;
+    public const uint SPIF_SENDCHANGE = 0x0002;
+
+    // 全部 13 个系统光标 ID（OCR_*），隐藏时逐个换成空光标。
+    public static readonly uint[] SystemCursorIds =
+        { 32512, 32513, 32514, 32515, 32516, 32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650 };
+
     public const uint EVENT_SYSTEM_FOREGROUND  = 0x0003;
     public const uint EVENT_OBJECT_SHOW        = 0x8002;
     public const uint WINEVENT_OUTOFCONTEXT    = 0x0000;
@@ -166,6 +180,7 @@ class TrayApp : ApplicationContext
     readonly HotkeyWindow hotkeyWindow;
     const int HOTKEY_ID = 1;
     bool hotkeyRegistered = false;
+    bool cursorsHidden = false;
 
     // 定时设置（分钟，支持小数；仅存内存，重启不保留）：
     //   0  = 关闭（交还系统自身的休眠/息屏）
@@ -178,6 +193,10 @@ class TrayApp : ApplicationContext
         winEventProc = OnWinEvent;
         hotkeyWindow = new HotkeyWindow();
         hotkeyWindow.Pressed = BlackOff; // 全局 Esc 仅在黑屏时注册，按下即收回
+
+        // 兜底：进程退出（含多数异常崩溃，除强杀外）时还原系统光标，
+        // 尽量避免“光标全局隐形”残留。
+        AppDomain.CurrentDomain.ProcessExit += (s, e) => RestoreSystemCursors();
 
         toggleItem = new ToolStripMenuItem("黑屏", null, (s, e) => Toggle());
 
@@ -219,7 +238,7 @@ class TrayApp : ApplicationContext
         isBlack = true;
 
         RefreshExecutionState();
-        Cursor.Hide();
+        HideSystemCursors();
 
         foreach (Screen scr in Screen.AllScreens)
         {
@@ -257,7 +276,7 @@ class TrayApp : ApplicationContext
         }
         blackForms.Clear();
 
-        Cursor.Show();
+        RestoreSystemCursors();
         RefreshExecutionState(); // 根据定时设置决定是否仍需阻止休眠
 
         toggleItem.Text = "黑屏";
@@ -353,6 +372,35 @@ class TrayApp : ApplicationContext
         hotkeyRegistered = false;
     }
 
+    // 光标是全局精灵、画在所有窗口之上，普通隐藏对穿透窗口无效，
+    // 这里把所有系统光标临时换成空（全透明）光标，收回时再从注册表还原。
+    void HideSystemCursors()
+    {
+        if (cursorsHidden) return;
+        // 32x32 单色光标：AND 全 1、XOR 全 0 => 完全透明（不可见）。
+        byte[] andPlane = new byte[128];
+        byte[] xorPlane = new byte[128];
+        for (int i = 0; i < andPlane.Length; i++) andPlane[i] = 0xFF;
+
+        bool any = false;
+        foreach (uint id in NativeMethods.SystemCursorIds)
+        {
+            // SetSystemCursor 会销毁传入的光标句柄，故每个 ID 都新建一个。
+            IntPtr blank = NativeMethods.CreateCursor(IntPtr.Zero, 0, 0, 32, 32, andPlane, xorPlane);
+            if (blank != IntPtr.Zero && NativeMethods.SetSystemCursor(blank, id)) any = true;
+        }
+        cursorsHidden = any;
+    }
+
+    void RestoreSystemCursors()
+    {
+        if (!cursorsHidden) return;
+        // 从注册表重新加载系统光标，恢复默认。
+        NativeMethods.SystemParametersInfo(
+            NativeMethods.SPI_SETCURSORS, 0, IntPtr.Zero, NativeMethods.SPIF_SENDCHANGE);
+        cursorsHidden = false;
+    }
+
     void SetAuto(double minutes)
     {
         autoMinutes = (minutes < 0) ? -1 : minutes; // 任意负数统一视为常亮
@@ -438,8 +486,9 @@ class TrayApp : ApplicationContext
         pollTimer.Stop();
         pollTimer.Dispose();
         autoMinutes = 0;       // 退出前清除常亮/定时，恢复系统默认休眠
-        BlackOff();            // BlackOff 内会注销热键 + 还原执行状态
+        BlackOff();            // BlackOff 内会注销热键、还原光标和执行状态
         if (!isBlack) RefreshExecutionState();
+        RestoreSystemCursors(); // 兜底再还原一次（幂等）
         hotkeyWindow.DestroyHandle();
         tray.Visible = false;
         tray.Dispose();
